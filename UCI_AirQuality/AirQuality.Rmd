@@ -1,0 +1,194 @@
+---
+title: "AirQuality Analysis"
+author: "Ashish Jha"
+date: "3/1/2018"
+output:
+  html_document: default
+---
+
+**Reading file into R**
+```{r, message=FALSE , warning= FALSE , cache=TRUE, tidy=TRUE}
+library(readxl)
+df <- read_excel("AirQualityUCI.xlsx")
+View(df)
+
+```
+
+*Getting Structure of the dataset*
+
+```{r, message=FALSE , warning= FALSE , cache=TRUE, tidy=TRUE}
+str(df)
+```
+
+
+**Getting summary of the dataset**
+
+```{r, message=FALSE , warning= FALSE , cache=TRUE, tidy=TRUE}
+#Since missing values are marked as -200
+df[df == -200 ] <- NA
+
+summary(df)
+
+```
+
+
+**Visualizing missing values in dataframe**
+   
+```{r, message=FALSE , warning= FALSE , cache=TRUE}
+library(lattice)
+library(VIM)
+library(mice)
+df_ <- df[,-c(1,2)]
+nhanes_miss = aggr(df_, col=mdc(1:2), numbers=TRUE, sortVars=TRUE, labels=names(df.mis), cex.axis=.7, gap=3, ylab=c("Proportion of missingness","Missingness Pattern"))
+
+```
+
+*Clearly NMHC(GT) column has too many missing values hence can't be imputed.*
+
+```{r, message=FALSE , warning= FALSE , cache=TRUE, tidy=TRUE}
+df <- subset(df , select = -c(5))
+df.mis <- subset(df , select = -c(1,2))
+```
+
+
+**Imputing missing values using MICE**
+
+```{r, message=FALSE , warning= FALSE , cache=TRUE, tidy=TRUE,eval=FALSE}
+#Imputing missing values using mice
+library(mice)
+mice_imputes = mice(df.mis, m=5, maxit = 10)
+```
+
+*Method used by mice for imputation*  
+*Since all the variable were integers it has used Predictive mean matching (pmm) technique to impute the data*
+```{r, message=FALSE , warning= FALSE , cache=TRUE, tidy=TRUE}
+mice_imputes$method
+```
+
+```{r, message=FALSE , warning= FALSE , cache=TRUE, tidy=TRUE}
+Imputed_data = complete(mice_imputes,3)
+```
+
+**Forming a dataset(dff) in which no value is missing hence can be evaluated further**
+```{r, message=FALSE , warning= FALSE , cache=TRUE, tidy=TRUE}
+ df_DT <- subset(df, select = c(1,2))
+ dff <- cbind(df_DT,Imputed_data)
+```
+
+**Visualizing distribution of different variables**
+
+```{r, message=FALSE , warning= FALSE , cache=TRUE, tidy=TRUE}
+library(reshape2)
+library(ggplot2)
+
+ggplot(data = melt(dff[,-c(1,2,15)]), mapping = aes(x = value)) + 
+    geom_histogram(bins = 50) + facet_wrap(~variable, scales = 'free_x')
+```
+
+
+
+**Combining data and time columns ** 
+```{r, message=FALSE , warning= FALSE , cache=TRUE, tidy=TRUE}
+Hours <- format(as.POSIXct(strptime(dff$Time,"%Y-%m-%d %H:%M:%S",tz="")) ,format = "%H:%M")
+dff$datetime <- as.POSIXct(paste(dff$Date, Hours), format="%Y-%m-%d %H:%M")
+```
+
+
+
+**Time Series plot to visually recognize the stationarity of series**
+
+```{r, message=FALSE , warning= FALSE , cache=TRUE, tidy=TRUE}
+library(ggplot2)
+library(reshape2)
+meltdf <- melt(dff[,-c(1,2)],id="datetime")
+#ggplot(meltdf,aes(x=datetime,y=value,colour=variable,group=variable)) + geom_line()
+
+ggplot(data = meltdf, mapping = aes(y = value, x = datetime)) + 
+    geom_line() + facet_wrap(~variable, scales = 'free_x')
+```
+*Every Varaible look stationary, hence no further manupulation required*
+
+```{r, message=FALSE , warning= FALSE , cache=TRUE, tidy=TRUE}
+#test-train split
+df_test <- subset(dff, datetime >= as.POSIXct('2005-04-04 00:00'))
+df_train <- subset(dff, datetime < as.POSIXct('2005-04-04 00:00'))
+```
+
+
+**Forecating variables as univariate time series**
+
+```{r, message=FALSE , warning= FALSE , cache=TRUE, tidy=TRUE}
+require(xts)
+require(forecast)
+time_index <- seq(from = as.POSIXct("2004-03-10 18:00"), 
+                  to = as.POSIXct("2005-04-03 23:00"), by = "hour")
+accuracy <- matrix(ncol=7, nrow=12)
+j=1
+for(i in 3:14){
+  ts <- xts(df_train[,i], order.by = time_index)
+  
+  fit <- auto.arima(ts)
+  #obtaining accuray of each fit
+  
+  accuracy[j,] <- accuracy(fit)
+  j=j+1
+}
+```
+
+
+
+```{r, message=FALSE , warning= FALSE , cache=TRUE, tidy=TRUE}
+acc_df <- data.frame(accuracy)
+colnames(acc_df) <- c("ME","RMSE","MAE","MPE","MAPE","MASE","ACF1")
+acc_df$variable <- c("CO(GT)","PT08.S1(CO)","C6H6(GT)","PT08.S2(NMHC)","NOx(GT)",          "PT08.S3(NOx)","NO2(GT)","PT08.S4(NO2)","PT08.S5(O3)","T","RH","AH")
+
+#Printing RMSE of timeseires forecast associated with the variable
+acc_df[,c("RMSE","variable")]
+
+
+```
+
+**Fitting an ARIMAX model**  
+Previously we have not considered the effect of other variable over the forecast of one variable.  
+Now lets take one varible to forecast (let say CO(GT)) and input other variables as exogenous regressors and compare the RMSE of previous univariate timeseries associated with that variable.
+```{r, message=FALSE , warning= FALSE , cache=TRUE, tidy=TRUE}
+
+ts <- xts(df_train[,3], order.by = time_index)
+#fitting arima model with exogenious variable
+fit_x <- auto.arima(ts, xreg = df_train[,-c(1,2,3,15)],trace = TRUE)
+
+```
+
+```{r, message=FALSE , warning= FALSE , cache=TRUE, tidy=TRUE}
+#forecating the timeseries
+pred <- forecast(fit_x, xreg = df_test[,-c(1,2,3,15)], h=15)
+```
+
+```{r, message=FALSE , warning= FALSE , cache=TRUE, tidy=TRUE}
+plot(pred, include = 300)
+
+```
+
+**calculating RMSE of the fit**
+```{r, message=FALSE , warning= FALSE , cache=TRUE, tidy=TRUE}
+predDF<- as.data.frame(pred)
+rmse <- sqrt(sum((predDF$`Point Forecast`-df_test[,3])^2)/15)
+
+rmse
+```
+
+Model  | RMSE
+------ | -------
+Arima  | 0.778
+ArimaX | 0.228
+
+
+Clearly there is a significant rise in quality of model fit. We can perform similar analysis with other variables too and get an improved model.
+
+
+
+
+
+
+
+
